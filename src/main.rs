@@ -1,3 +1,4 @@
+mod browser;
 mod cli;
 mod client;
 mod commands;
@@ -6,6 +7,7 @@ mod dates;
 mod error;
 mod output;
 mod secrets;
+mod session;
 
 use clap::Parser;
 

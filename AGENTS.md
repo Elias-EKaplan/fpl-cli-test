@@ -22,6 +22,8 @@ before touching `src/client.rs`.
 | `src/commands/*.rs` | one handler module per resource group (accounts, bills, payments, usage, history, profile, meter, alerts, lookup, outages, …) |
 | `src/client.rs` | `Fpl` HTTP client: login, session, endpoints, raw `request` |
 | `src/secrets.rs` | `Secret` (redacting/zeroizing) + `CredentialStore` + ingress |
+| `src/browser.rs` | passkey login: minimal DevTools-protocol driver over a persistent browser profile, success detection |
+| `src/session.rs` | saved browser session (JWT + `fpl.com` cookies, `0600`) reused by `Ctx::connect` |
 | `src/config.rs` | `~/.config/fpl-cli/config.json` (non-secret prefs) |
 | `src/output.rs` | text rendering + control-plane JSON |
 | `src/error.rs` | `AppError` + exit codes |
@@ -41,6 +43,9 @@ before touching `src/client.rs`.
   from `--stdin` or `--from-env <VAR>` — **never a `--value`/`--password` flag**
   (leaks to `ps`, history, transcripts). Credential replacement uses
   `--overwrite`. Wrap secrets in `secrets::Secret`; never log or serialize one.
+  The one on-disk exception is the short-lived session captured by
+  `auth login --passkey` (`fpl-session.json`, `0600`, in the browser profile
+  dir) — never log its JWT/cookies, and never forge WebAuthn over HTTP.
 - **Mutation safety.** `payments create` moves money — confirm by default, skip
   with `--force` (NOT `--yes`). A non-TTY run without `--force` fails with a hint.
 - **Output: text is primary.** Resource reads render `Key: value` blocks and

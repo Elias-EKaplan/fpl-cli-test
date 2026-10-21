@@ -182,7 +182,8 @@ pub struct SetCredentialArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
-    /// Verify credentials and store them in the keychain (same as `fpl init`).
+    /// Verify credentials and store them in the keychain (same as `fpl init`),
+    /// or sign in with a passkey in a browser window (`--passkey`).
     Login(AuthLoginArgs),
     /// Write a single credential to the keychain (rotation / headless setup).
     SetCredential(SetCredentialArgs),
@@ -192,7 +193,8 @@ pub enum AuthCommand {
         #[arg(long)]
         json: bool,
     },
-    /// End the FPL session and remove the stored password.
+    /// End the FPL session and remove the stored password and saved passkey
+    /// session.
     Logout {
         /// Clear saved username/account and remove the credential without logging in to FPL.
         #[arg(long)]
@@ -207,9 +209,54 @@ pub struct AuthLoginArgs {
     /// Open FPL's account login page in the default browser as a helper.
     ///
     /// The browser session is not transferred to the CLI; credential
-    /// verification still uses the FPL API login.
+    /// verification still uses the FPL API login. See `--passkey` for a
+    /// browser login whose session the CLI keeps.
     #[arg(long)]
     pub browser: bool,
+    #[command(flatten)]
+    pub passkey: PasskeyArgs,
+}
+
+/// Semi-automatic passkey login through a real browser window.
+#[derive(Args, Debug, Default)]
+pub struct PasskeyArgs {
+    /// Sign in with a passkey in a browser window (Chrome, Edge, Brave, or
+    /// Chromium), then reuse that session for later commands.
+    ///
+    /// The CLI opens FPL's login page with a persistent browser profile, fills
+    /// your username, and clicks "sign in with passkey"; you approve the
+    /// prompt (Touch ID, Windows Hello, security key, or phone). No password is
+    /// stored. Later commands reuse the saved session until it expires.
+    #[arg(
+        long,
+        conflicts_with_all = ["browser", "password_stdin", "password_from_env", "no_verify", "overwrite"]
+    )]
+    pub passkey: bool,
+    /// Persistent browser profile directory (default: `browser-profile/`
+    /// beside the config file; also $FPL_BROWSER_PROFILE or config
+    /// `browser_profile_dir`).
+    #[arg(long, value_name = "DIR")]
+    pub profile_dir: Option<String>,
+    /// Browser executable to drive (default: auto-detect; also config
+    /// `browser_path`).
+    #[arg(long, value_name = "EXE", env = "FPL_BROWSER")]
+    pub browser_path: Option<String>,
+    /// Run the browser without a window. Passkey prompts can't appear, so this
+    /// only works while the profile is still signed in to FPL.
+    #[arg(long, requires = "passkey")]
+    pub headless: bool,
+    /// Seconds to wait for the login to finish (default: 180, or config
+    /// `browser_timeout`).
+    #[arg(long, value_name = "SECS", requires = "passkey",
+          value_parser = clap::value_parser!(u64).range(1..))]
+    pub timeout: Option<u64>,
+    /// Discard the saved session and clear FPL cookies in the profile first,
+    /// forcing a fresh passkey sign-in.
+    #[arg(long, requires = "passkey")]
+    pub reset_session: bool,
+    /// Override the FPL login page URL (troubleshooting, if FPL moves it).
+    #[arg(long, value_name = "URL", requires = "passkey")]
+    pub login_url: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -218,7 +265,8 @@ pub enum ConfigCommand {
     Path,
     /// Show the effective configuration.
     Show,
-    /// Set a config key: `username` or `account`.
+    /// Set a config key: `username`, `account`, `browser_profile_dir`,
+    /// `browser_path`, or `browser_timeout`.
     Set { key: String, value: String },
     /// Remove a config key.
     Unset { key: String },
@@ -397,6 +445,48 @@ mod tests {
         ));
 
         assert!(Cli::try_parse_from(["fpl", "init", "--browser"]).is_err());
+    }
+
+    #[test]
+    fn passkey_login_options_parse() {
+        let cli = Cli::try_parse_from([
+            "fpl",
+            "auth",
+            "login",
+            "--passkey",
+            "--profile-dir",
+            "/tmp/fpl-profile",
+            "--browser-path",
+            "/usr/bin/chromium",
+            "--headless",
+            "--timeout",
+            "60",
+            "--reset-session",
+        ])
+        .unwrap();
+        let Command::Auth(AuthCommand::Login(args)) = cli.command else {
+            panic!("expected auth login");
+        };
+        let p = args.passkey;
+        assert!(p.passkey && p.headless && p.reset_session);
+        assert_eq!(p.profile_dir.as_deref(), Some("/tmp/fpl-profile"));
+        assert_eq!(p.browser_path.as_deref(), Some("/usr/bin/chromium"));
+        assert_eq!(p.timeout, Some(60));
+    }
+
+    #[test]
+    fn passkey_login_rejects_password_and_orphan_flags() {
+        for argv in [
+            &["fpl", "auth", "login", "--passkey", "--password-stdin"][..],
+            &["fpl", "auth", "login", "--passkey", "--browser"],
+            &["fpl", "auth", "login", "--passkey", "--timeout", "0"],
+            // Browser-only knobs need --passkey.
+            &["fpl", "auth", "login", "--headless"],
+            &["fpl", "auth", "login", "--reset-session"],
+            &["fpl", "init", "--passkey"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} should fail");
+        }
     }
 }
 

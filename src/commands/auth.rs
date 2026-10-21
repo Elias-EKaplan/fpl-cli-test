@@ -6,6 +6,7 @@ use crate::cli::AuthCommand;
 use crate::commands::Ctx;
 use crate::config::Config;
 use crate::error::AppError;
+use crate::session;
 
 pub fn run(ctx: &Ctx, cmd: &AuthCommand) -> Result<(), AppError> {
     match cmd {
@@ -22,19 +23,41 @@ fn status(ctx: &Ctx, json_flag: bool) -> Result<(), AppError> {
         .username
         .clone()
         .or_else(|| ctx.cfg.username.clone());
+    let profile_dir = session::resolve_profile_dir(None, ctx.cfg)?;
+    let saved = username
+        .as_deref()
+        .and_then(|u| session::load(&profile_dir, u));
     let password_length = match &username {
-        Some(u) => crate::commands::get_credential_migrating(u)?
-            .map(|secret| secret.expose().chars().count()),
+        // A keychain error mustn't hide a usable passkey session.
+        Some(u) => match crate::commands::get_credential_migrating(u) {
+            Ok(secret) => secret.map(|secret| secret.expose().chars().count()),
+            Err(_) if saved.is_some() => None,
+            Err(e) => return Err(e),
+        },
         None => None,
     };
     let has_password = password_length.is_some();
     let account = ctx.cli.account.clone().or_else(|| ctx.cfg.account.clone());
+    let session_valid = saved.as_ref().map(|s| !s.is_expired(session::now_unix()));
 
-    let mut st = AuthStatus::new(true, has_password, AuthMethod::Password);
+    let (authenticated, method) = match session_valid {
+        Some(true) => (true, AuthMethod::BrowserSession),
+        Some(false) if !has_password => (false, AuthMethod::BrowserSession),
+        _ => (has_password, AuthMethod::Password),
+    };
+    let mut st = AuthStatus::new(true, authenticated, method);
     st.username = username;
     st.account = account;
     st.credential_in_keychain = Some(has_password);
+    st.session_valid = session_valid;
+    st.expires_at = saved.as_ref().and_then(|s| s.expires_at());
     st.emit(json_flag);
+    if saved.is_some() && !json_flag {
+        println!(
+            "Passkey session: {}",
+            session::session_path(&profile_dir).display()
+        );
+    }
     match (json_flag, password_length) {
         (false, Some(length)) => println!("Credential length: {length} characters"),
         (false, None) => println!("Credential length: unavailable"),
@@ -55,6 +78,9 @@ fn logout(ctx: &Ctx, forget: bool) -> Result<(), AppError> {
         }
     }
 
+    let profile_dir = session::resolve_profile_dir(None, ctx.cfg)?;
+    let removed_session = session::delete(&profile_dir)?;
+
     let mut removed = false;
     if let Some(u) = ctx
         .cli
@@ -68,14 +94,19 @@ fn logout(ctx: &Ctx, forget: bool) -> Result<(), AppError> {
         Config::clear()?;
     }
     if !ctx.cli.quiet {
-        eprintln!(
-            "logged out{}",
-            if removed {
-                " and cleared stored password"
-            } else {
-                ""
-            }
-        );
+        let cleared: Vec<&str> = [
+            (removed, "stored password"),
+            (removed_session, "saved passkey session"),
+        ]
+        .iter()
+        .filter(|(done, _)| *done)
+        .map(|(_, what)| *what)
+        .collect();
+        if cleared.is_empty() {
+            eprintln!("logged out");
+        } else {
+            eprintln!("logged out and cleared {}", cleared.join(" and "));
+        }
     }
     Ok(())
 }

@@ -19,6 +19,7 @@ flowchart LR
     Secrets["Credential store<br/>OS keychain"]
     Shared["Shared CLI behavior<br/>pk-cli-* crates"]
     Client["FPL HTTP client<br/>client.rs"]
+    BrowserLogin["Passkey browser login<br/>browser.rs · session.rs"]
     Portal["FPL JSON services<br/>www.fpl.com"]
     Outages["Public outage feed<br/>fplmaps.com"]
     Output["Output rendering<br/>output.rs"]
@@ -32,6 +33,9 @@ flowchart LR
     Handlers --> Outages
     Context --> Secrets
     Context --> Client
+    Handlers --> BrowserLogin
+    BrowserLogin --> Portal
+    BrowserLogin -. "saved session" .-> Context
     Client --> Portal
     Outages --> Output
     Portal --> Client --> Handlers
@@ -58,6 +62,12 @@ flowchart TD
     Parse --> Load["Load non-secret config"]
     Load --> Route{"Which command?"}
 
+    Route -->|auth login --passkey| Browser["Launch browser with persistent profile<br/>browser.rs · DevTools protocol"]
+    Browser --> Passkey["Fill username, click passkey;<br/>user approves native WebAuthn prompt"]
+    Passkey --> Detect["Detect login.success response<br/>or /my-account/ page"]
+    Detect --> Capture["Capture jwttoken + fpl.com cookies,<br/>verify, save fpl-session.json"]
+    Capture --> SetupOutput
+
     Route -->|init / auth login| Ingress["Read password from prompt,<br/>stdin, or environment"]
     Ingress --> Store["Store password in OS keychain"]
     Store --> Verify{"Verify requested?"}
@@ -80,7 +90,10 @@ flowchart TD
     Public --> Render["Render text or JSON"]
 
     Route -->|account, lookup, and other authenticated commands| Username["Resolve username<br/>CLI/env, then config"]
-    Username --> Keychain["Read password from OS keychain"]
+    Username --> Saved{"Saved passkey session<br/>usable?"}
+    Saved -->|yes| Resume["Resume session<br/>(JWT + cookies)"]
+    Resume --> Account
+    Saved -->|"no / lapsed with password stored"| Keychain["Read password from OS keychain"]
     Keychain --> LoginSession["Login; retain JWT and cookies"]
     LoginSession --> Account{"Needs an account?"}
     Account -->|yes| ResolveAccount["Resolve account<br/>positional, --account/env,<br/>config, then first account"]
@@ -107,3 +120,11 @@ documented in [api.md](./api.md).
 open a session through the current command handler. `auth logout` makes a
 best-effort server-side logout when a session can be opened; with `--forget`, it
 skips provider login and clears the local credential and config directly.
+
+`auth login --passkey` is the browser-driven path: `browser.rs` runs a minimal
+synchronous DevTools-protocol client against the user's Chromium-family browser
+(no bundled browser or Node runtime), and `session.rs` stores the captured
+session owner-only in the profile directory. `Ctx::connect` prefers a saved
+session; when a password is also stored, it probes the session first and falls
+back to the password login if FPL rejects it. `auth logout` deletes the saved
+session; the browser profile itself is left in place.

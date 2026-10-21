@@ -1,6 +1,7 @@
 //! On-disk config for fpl-cli. Stores only non-secret preferences (the default
-//! FPL username and, optionally, a default account number) so day-to-day
-//! commands don't need `--username`/`--account` every time. The password itself
+//! FPL username, optionally a default account number, and passkey-login browser
+//! settings) so day-to-day commands don't need `--username`/`--account` every
+//! time. The password itself
 //! never lands here — it lives in the OS keychain (see [`crate::secrets`]).
 //! Storage and pathing come from `pk-cli-config`
 //! (`${XDG_CONFIG_HOME:-~/.config}/fpl-cli/config.json`).
@@ -22,6 +23,17 @@ pub struct Config {
     /// account-scoped, so we only write it when explicitly set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Persistent browser profile for `fpl auth login --passkey` (holds the
+    /// browser's own state plus the saved FPL session). Default:
+    /// `browser-profile/` beside this file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_profile_dir: Option<String>,
+    /// Chrome/Chromium/Edge executable for passkey login (default: auto-detect).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_path: Option<String>,
+    /// Seconds to wait for the passkey login to complete (default: 180).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_timeout: Option<u64>,
 }
 
 fn store() -> ConfigStore {

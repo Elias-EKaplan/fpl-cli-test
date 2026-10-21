@@ -1,5 +1,6 @@
 //! `fpl config` — the piekstra-cli/1 standard `config path|show|set|unset`
-//! surface over the non-secret settings (`username`, `account`). The password
+//! surface over the non-secret settings (`username`, `account`, and the
+//! passkey-login `browser_profile_dir` / `browser_path` / `browser_timeout`). The password
 //! is deliberately not a config key — it lives in the OS keychain
 //! (`fpl set-credential`).
 
@@ -39,9 +40,22 @@ fn apply_key(cfg: &mut Config, key: &str, value: Option<&str>) -> Result<(), App
     match key {
         "username" => cfg.username = value.map(String::from),
         "account" => cfg.account = value.map(String::from),
+        "browser_profile_dir" => cfg.browser_profile_dir = value.map(String::from),
+        "browser_path" => cfg.browser_path = value.map(String::from),
+        "browser_timeout" => {
+            cfg.browser_timeout = value
+                .map(|v| match v.trim().parse::<u64>() {
+                    Ok(n) if n > 0 => Ok(n),
+                    _ => Err(AppError::Usage(format!(
+                        "browser_timeout must be a positive number of seconds, got {v:?}"
+                    ))),
+                })
+                .transpose()?
+        }
         other => {
             return Err(AppError::Usage(format!(
-                "unknown config key {other:?} (settable: username, account)"
+                "unknown config key {other:?} (settable: username, account, \
+                 browser_profile_dir, browser_path, browser_timeout)"
             )))
         }
     }
@@ -65,6 +79,18 @@ mod tests {
         assert_eq!(cfg.account.as_deref(), Some("1234567890"));
         apply_key(&mut cfg, "account", None).unwrap();
         assert_eq!(cfg.account, None);
+
+        apply_key(&mut cfg, "browser_profile_dir", Some("/tmp/fpl-profile")).unwrap();
+        assert_eq!(cfg.browser_profile_dir.as_deref(), Some("/tmp/fpl-profile"));
+        apply_key(&mut cfg, "browser_path", Some("/usr/bin/chromium")).unwrap();
+        assert_eq!(cfg.browser_path.as_deref(), Some("/usr/bin/chromium"));
+        apply_key(&mut cfg, "browser_timeout", Some("300")).unwrap();
+        assert_eq!(cfg.browser_timeout, Some(300));
+        assert!(apply_key(&mut cfg, "browser_timeout", Some("0")).is_err());
+        assert!(apply_key(&mut cfg, "browser_timeout", Some("soon")).is_err());
+        assert_eq!(cfg.browser_timeout, Some(300));
+        apply_key(&mut cfg, "browser_timeout", None).unwrap();
+        assert_eq!(cfg.browser_timeout, None);
 
         // Unknown keys — and the password in particular — are usage errors.
         assert!(apply_key(&mut cfg, "password", Some("x")).is_err());

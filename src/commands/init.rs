@@ -13,6 +13,9 @@ use crate::output;
 use crate::secrets::{self, CredentialStore, Secret};
 
 pub fn run_auth(ctx: &Ctx, args: &AuthLoginArgs) -> Result<(), AppError> {
+    if args.passkey.passkey {
+        return crate::commands::passkey::run(ctx, args);
+    }
     if args.browser {
         open_fpl_login_page()?;
         if !ctx.cli.quiet {

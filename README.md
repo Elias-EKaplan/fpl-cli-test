@@ -73,7 +73,9 @@ $ fpl auth login --browser
 ```
 
 `--browser` does not transfer the browser session or its MFA state to the CLI;
-credential verification still uses the documented API login.
+credential verification still uses the documented API login. For a browser
+login the CLI *does* keep, see
+[Passkey / MFA login](#passkey--mfa-login-semi-automatic-browser-driven).
 
 To reset the stored account and password in the OS key-chain use:
 ```sh
@@ -90,6 +92,81 @@ Rotate a stored password without re-running full setup:
 ```sh
 op read 'op://Private/FPL/password' | fpl set-credential --stdin --overwrite
 ```
+
+### Passkey / MFA login (semi-automatic, browser-driven)
+
+If your FPL login uses a **passkey** (or you'd rather not store a password),
+sign in through a real browser window instead:
+
+```sh
+$ fpl auth login --passkey --username you@example.com
+opened the FPL login page in the browser window
+requested passkey sign-in — approve the prompt (Touch ID, Windows Hello, security key, or phone) in the browser window
+signed in as you@example.com with a passkey; session saved to ~/.config/fpl-cli/browser-profile/fpl-session.json (expires …); active account 1234567890
+
+$ fpl summary        # reuses the saved session — no browser, no prompt
+```
+
+**How it works.** A passkey is WebAuthn: FPL's challenge must be signed by an
+authenticator you control, so it can't be scripted over plain HTTP (and `fpl`
+doesn't try). Instead `fpl` drives your installed Chrome, Edge, Brave, or
+Chromium over the DevTools protocol:
+
+1. It launches the browser with a **persistent profile** (by default
+   `browser-profile/` beside the config file), so cookies, device trust, and
+   passkeys saved in that profile survive between runs.
+2. It opens `https://www.fpl.com/my-account/login.html`, fills your username,
+   and clicks **sign in with passkey**. The browser shows its native passkey
+   prompt; you approve it.
+3. It watches for success — FPL's `login.success` response from the passkey
+   endpoint, or the tab landing on a `/my-account/…` page — then captures the
+   session (`jwttoken` + `fpl.com` cookies), checks it against FPL's API, and
+   closes the browser.
+4. The session is saved owner-only (`0600`) as `fpl-session.json` in the profile
+   directory. Later commands reuse it over plain HTTP until it expires.
+
+**First run.** Expect the browser window to open and a passkey prompt: approve
+it with Touch ID / Windows Hello / your PIN, a security key, or by scanning the
+QR code with your phone. If the page can't be automated (FPL changed its
+markup, or your account uses email/password + one-time code), `fpl` says so —
+just finish signing in in that window; it keeps watching for success.
+
+**Later runs.** Ordinary commands reuse the saved session without opening a
+browser. When it lapses, they exit `3` with a hint (or, if a password is also
+in the keychain, quietly fall back to the password login). Re-running
+`fpl auth login --passkey` reuses the profile, so if FPL still trusts that
+browser it completes with little or no prompting. `fpl auth status` shows the
+session and its expiry; `fpl auth logout` deletes the saved session.
+
+| Option | Config key | Meaning |
+|--------|------------|---------|
+| `--profile-dir <DIR>` (or `$FPL_BROWSER_PROFILE`) | `browser_profile_dir` | Persistent browser profile + saved session location |
+| `--browser-path <EXE>` (or `$FPL_BROWSER`) | `browser_path` | Browser to drive (default: auto-detect Chrome → Edge → Brave → Chromium) |
+| `--timeout <SECS>` | `browser_timeout` | How long to wait for the sign-in (default `180`) |
+| `--headless` | — | No window; only succeeds while the profile is still signed in (passkey prompts need a window) |
+| `--reset-session` | — | Discard the saved session and clear FPL cookies in the profile, forcing a fresh sign-in |
+| `--login-url <URL>` | — | Override the login page if FPL moves it |
+
+Nothing secret is logged: `-v` prints only request method, status, and the URL
+without its query string — never headers, cookies, bodies, or WebAuthn data.
+
+**Troubleshooting**
+
+- *"the browser exited before it was ready"* — another window already has that
+  profile open. Close it (or use a different `--profile-dir`) and retry.
+- *No browser found* — install Chrome/Edge/Chromium or pass `--browser-path`.
+  On Linux, snap-packaged Chromium can't use hidden directories such as
+  `~/.config`; point `--profile-dir` somewhere visible or use a non-snap build.
+- *No passkey offered* — the profile is new to this browser. Use "use a phone
+  or tablet" (QR code), a security key, or sign in once with password + code
+  in the window; your OS/browser passkey store (iCloud Keychain, Windows Hello,
+  Google Password Manager when signed in to that profile) is used when present.
+- *Timed out* — raise `--timeout`, and approve the prompt in the window `fpl`
+  opened (not another browser window).
+- *Session rejected right after sign-in* — retry with `-v`; if it persists,
+  `--reset-session` starts clean.
+- *Start completely fresh* — `fpl auth logout`, then delete the profile
+  directory (`fpl config path` shows where it lives).
 
 ## Commands
 
@@ -126,7 +203,8 @@ fpl profile [account-id]          # account holder: name, email, phone, mailing 
 
 ```sh
 fpl config show                   # effective non-secret settings
-fpl config set account 1234567890 # keys: username, account
+fpl config set account 1234567890 # keys: username, account, browser_profile_dir,
+                                  #       browser_path, browser_timeout
 fpl config unset account
 fpl config path                   # where the config file lives
 ```
@@ -285,6 +363,8 @@ fpl api GET https://www.fplmaps.com/customer/outage/CountyOutages.json \
 |-----|---------|
 | `FPL_USERNAME` | Default login email |
 | `FPL_ACCOUNT` | Default account number |
+| `FPL_BROWSER_PROFILE` | Browser profile directory for passkey login (and its saved session) |
+| `FPL_BROWSER` | Browser executable for `auth login --passkey` |
 
 Secrets never enter through an env var the CLI reads at runtime — pass them to
 `init`/`set-credential` via `--password-from-env` / `--from-env` at setup time.
