@@ -32,14 +32,14 @@ pub fn run(ctx: &Ctx, args: &SetCredentialArgs) -> Result<(), AppError> {
         return Err(AppError::Usage("empty secret — nothing stored".into()));
     }
 
-    let store = CredentialStore::new(SERVICE);
     let existed = crate::commands::get_credential_migrating(&username)?.is_some();
     if existed && !args.overwrite {
         return Err(AppError::Usage(format!(
             "a credential for {username:?} already exists — pass --overwrite to replace it"
         )));
     }
-    store.set(&username, &secret)?;
+    let password_length = secret.expose().chars().count();
+    CredentialStore::new(SERVICE).set(&username, &secret)?;
 
     // Remember the username so later commands default to it.
     if ctx.cfg.username.as_deref() != Some(username.as_str()) {
@@ -49,7 +49,7 @@ pub fn run(ctx: &Ctx, args: &SetCredentialArgs) -> Result<(), AppError> {
     }
 
     if !ctx.cli.quiet {
-        eprintln!("stored password for {username} in the keychain");
+        eprintln!("stored password for {username} in the keychain ({password_length} characters)");
     }
     if args.json || ctx.cli.json {
         output::json(&json!({
@@ -57,6 +57,7 @@ pub fn run(ctx: &Ctx, args: &SetCredentialArgs) -> Result<(), AppError> {
             "key": "password",
             "username": username,
             "overwritten": existed,
+            "credential_length_chars": password_length,
         }));
     }
     Ok(())

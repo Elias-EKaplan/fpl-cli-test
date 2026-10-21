@@ -183,7 +183,7 @@ pub struct SetCredentialArgs {
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
     /// Verify credentials and store them in the keychain (same as `fpl init`).
-    Login(InitArgs),
+    Login(AuthLoginArgs),
     /// Write a single credential to the keychain (rotation / headless setup).
     SetCredential(SetCredentialArgs),
     /// Show configured username, active account, and keychain state.
@@ -194,10 +194,22 @@ pub enum AuthCommand {
     },
     /// End the FPL session and remove the stored password.
     Logout {
-        /// Also clear the saved username/account from config.
+        /// Clear saved username/account and remove the credential without logging in to FPL.
         #[arg(long)]
         forget: bool,
     },
+}
+
+#[derive(Args, Debug)]
+pub struct AuthLoginArgs {
+    #[command(flatten)]
+    pub init: InitArgs,
+    /// Open FPL's account login page in the default browser as a helper.
+    ///
+    /// The browser session is not transferred to the CLI; credential
+    /// verification still uses the FPL API login.
+    #[arg(long)]
+    pub browser: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -369,6 +381,23 @@ pub enum HistoryCommand {
     },
     /// List the valid `--type` values for `history list`.
     Types,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthCommand, Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn browser_flag_is_available_only_for_auth_login() {
+        let cli = Cli::try_parse_from(["fpl", "auth", "login", "--browser"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Auth(AuthCommand::Login(args)) if args.browser
+        ));
+
+        assert!(Cli::try_parse_from(["fpl", "init", "--browser"]).is_err());
+    }
 }
 
 #[derive(Subcommand, Debug)]

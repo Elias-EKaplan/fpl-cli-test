@@ -117,26 +117,9 @@ impl Fpl {
             return Ok(Fpl { client, jwt });
         }
 
-        if status.as_u16() == 401 {
-            // Body carries a machine code: NOTVALIDUSER / FAILEDPASSWORD / ...
-            let body: Value = resp.json().unwrap_or(Value::Null);
-            let code = body
-                .get("messageCode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let msg = match code {
-                "NOTVALIDUSER" => "FPL rejected the username (no such account).".to_string(),
-                "FAILEDPASSWORD" => "FPL rejected the password.".to_string(),
-                other if !other.is_empty() => format!("FPL login failed ({other})."),
-                _ => "FPL login failed (401).".to_string(),
-            };
-            return Err(AppError::Auth(format!(
-                "{msg} Re-run `fpl init` with the credentials you use at fpl.com."
-            )));
-        }
-
+        let body = resp.text()?;
         Err(AppError::Auth(format!(
-            "FPL login failed (HTTP {}).",
+            "FPL login failed (HTTP {}): {body}",
             status.as_u16()
         )))
     }

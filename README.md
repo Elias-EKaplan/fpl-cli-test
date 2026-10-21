@@ -10,7 +10,8 @@ FPL publishes no official public API. This is a polite client over the same
 follows a small set of ergonomics: a fixed **verb** command surface,
 **keychain-only** runtime secrets with stdin/env ingress, **text-first** output,
 and a stable exit-code contract. Endpoint mapping is in
-[`docs/api.md`](docs/api.md).
+[`docs/api.md`](docs/api.md); component architecture and command flow are in
+[`docs/architecture.md`](docs/architecture.md).
 
 > **Status: work in progress.** The public **outage** feed needs no login and is
 > fully verified. Authenticated commands target real, confirmed-reachable
@@ -20,20 +21,36 @@ and a stable exit-code contract. Endpoint mapping is in
 
 ## Install
 
+Install the stable Rust toolchain first; it includes Cargo. On macOS or Linux,
+use [rustup](https://rustup.rs/):
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+On Windows, download and run `rustup-init.exe` from
+[rustup.rs](https://rustup.rs/). After installation, open a new terminal (or
+follow rustup's instructions to add Cargo to your `PATH`).
+
+Then, from the repository:
+
 ```sh
 make install          # cargo install --path . → the `fpl` binary on your PATH
 # or
 cargo build --release # binary at ./target/release/fpl
 ```
 
-The crate/repo is `fpl-cli`; the binary is **`fpl`**. Requires a recent stable
-Rust toolchain. macOS, Windows, and Linux are supported (each uses its native
-secret store).
+The crate/repo is `fpl-cli`; the binary is **`fpl`**. macOS, Windows, and
+Linux are supported (each uses its native secret store).
 
 ## Getting started
 
 Set up once. Your password is read from stdin or an env var and stored only in
 the OS keychain — there is deliberately no password flag.
+
+The `op read` examples require the [1Password CLI (`op`)](https://developer.1password.com/docs/cli/get-started/)
+to be installed and signed in. If you don't use 1Password, run `fpl init`
+interactively instead; it prompts for your password without echoing it.
 
 ```sh
 # Interactive first-time setup (prompts, no echo):
@@ -50,7 +67,23 @@ $ fpl auth status
 username: you@example.com
 account:  1234567890
 password: stored in keychain
+
+# Optionally open FPL's account login page as a browser helper:
+$ fpl auth login --browser
 ```
+
+`--browser` does not transfer the browser session or its MFA state to the CLI;
+credential verification still uses the documented API login.
+
+To reset the stored account and password in the OS key-chain use:
+```sh
+fpl auth logout --forget
+```
+
+Setup and credential-rotation confirmations report the entered password's
+character count, never its value. `fpl auth status` reports the stored
+credential's character count (on stderr with `--json`, preserving the
+`auth-status/v1` JSON schema).
 
 Rotate a stored password without re-running full setup:
 

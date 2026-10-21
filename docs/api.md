@@ -23,10 +23,18 @@ Nothing here is guaranteed stable. FPL can change these at any time.
 
 1. **Login** — `GET /cs/customer/v1/registration/loginAndUseMigration?migrationToggle=Y&view=LoginMini`
    with HTTP **Basic** auth (`username:password`). On success (`200`), the
-   response carries a **`jwttoken`** header and sets session cookies. On `401`,
-   the JSON body has a `messageCode` — `NOTVALIDUSER` or `FAILEDPASSWORD`.
+   response carries a **`jwttoken`** header and sets session cookies. Login
+   failures include the HTTP status and full response body in the CLI error;
+   the body may contain a `messageCode`, such as `NOTVALIDUSER` or
+   `FAILEDPASSWORD`.
 2. **Authenticated calls** — send the `jwttoken` header and reuse the cookie jar.
 3. **Logout** — `GET /cs/customer/v1/registration/logout`.
+
+`fpl auth login --browser` opens FPL's account login page in the system browser
+as a helper, then follows the same CLI credential/API login flow. It does not
+transfer browser cookies or an authenticated browser session to the CLI. MFA
+input is not implemented because the API's MFA challenge and response format
+is not documented here.
 
 Former **Gulf Power** accounts (Northwest Florida, "FL02") use an AWS Cognito
 SRP login against `cognito-idp.us-east-1.amazonaws.com` instead, and a separate
