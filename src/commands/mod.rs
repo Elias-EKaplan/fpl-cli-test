@@ -13,6 +13,7 @@ pub mod init;
 pub mod lookup;
 pub mod meter;
 pub mod outages;
+pub mod passkey;
 pub mod payments;
 pub mod profile;
 pub mod set_credential;
@@ -29,6 +30,7 @@ use crate::client::Fpl;
 use crate::config::Config;
 use crate::error::AppError;
 use crate::secrets::CredentialStore;
+use crate::session;
 
 /// Family keychain service name (SPEC v1: `piekstra.<bin>`).
 pub const SERVICE: &str = "piekstra.fpl";
@@ -111,20 +113,71 @@ impl Ctx<'_> {
         ))
     }
 
-    /// Open an authenticated session. Runtime secrets come only from the
-    /// keychain; `fpl init` / `fpl set-credential` are how they get there.
+    fn debug(&self, msg: &str) {
+        if self.cli.verbose && !self.cli.quiet {
+            eprintln!("{msg}");
+        }
+    }
+
+    /// Open an authenticated session. A saved passkey session (from `fpl auth
+    /// login --passkey`) is reused when present; otherwise the password comes
+    /// only from the keychain — `fpl init` / `fpl set-credential` put it there.
     pub fn connect(&self) -> Result<Fpl, AppError> {
         let username = self.resolve_username()?;
-        let secret = get_credential_migrating(&username)?.ok_or_else(|| {
+        let profile_dir = session::resolve_profile_dir(None, self.cfg)?;
+        let password = match session::load(&profile_dir, &username) {
+            Some(saved) => {
+                // A keychain hiccup mustn't block a usable passkey session.
+                let password = get_credential_migrating(&username).unwrap_or(None);
+                if let Some(fpl) = self.resume(&saved, &username, password.is_some())? {
+                    return Ok(fpl);
+                }
+                password
+            }
+            None => get_credential_migrating(&username)?,
+        };
+        let secret = password.ok_or_else(|| {
             AppError::Auth(format!(
-                "no stored password for {username:?} — run `fpl init` or \
-                 `fpl set-credential --stdin`"
+                "no stored password or passkey session for {username:?} — run \
+                 `fpl auth login --passkey`, `fpl init`, or `fpl set-credential --stdin`"
             ))
         })?;
-        if self.cli.verbose && !self.cli.quiet {
-            eprintln!("logging in to FPL as {username}");
-        }
+        self.debug(&format!("logging in to FPL as {username}"));
         Fpl::login(&username, &secret)
+    }
+
+    /// Try a saved passkey session. With a password to fall back on, the
+    /// session is probed first so a lapsed one quietly yields to the password
+    /// login (`Ok(None)`); without one, the session is used as-is.
+    fn resume(
+        &self,
+        saved: &session::SavedSession,
+        username: &str,
+        can_fall_back: bool,
+    ) -> Result<Option<Fpl>, AppError> {
+        if saved.is_expired(session::now_unix()) {
+            if can_fall_back {
+                self.debug("saved passkey session has expired; using the stored password");
+                return Ok(None);
+            }
+            return Err(AppError::Auth(format!(
+                "the saved passkey session for {username:?} has expired — run \
+                 `fpl auth login --passkey`"
+            )));
+        }
+        let fpl = Fpl::from_session(saved)?;
+        if can_fall_back {
+            match fpl.header() {
+                Ok(_) => {}
+                Err(AppError::Auth(_)) => {
+                    self.debug("saved passkey session was rejected; using the stored password");
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        self.debug(&format!("using the saved passkey session for {username}"));
+        Ok(Some(fpl))
     }
 
     /// Resolve the account to act on: explicit positional, then global

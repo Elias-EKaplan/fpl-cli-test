@@ -32,9 +32,38 @@ Nothing here is guaranteed stable. FPL can change these at any time.
 
 `fpl auth login --browser` opens FPL's account login page in the system browser
 as a helper, then follows the same CLI credential/API login flow. It does not
-transfer browser cookies or an authenticated browser session to the CLI. MFA
-input is not implemented because the API's MFA challenge and response format
-is not documented here.
+transfer browser cookies or an authenticated browser session to the CLI.
+
+### Passkey login (browser-driven)
+
+The web login page (`/my-account/login.html`) offers a passkey sign-in. It is
+two calls to the same path, distinguished by verb:
+
+1. `POST /cs/customer/v3/login/public/passkeys/authentication` with
+   `{"userName": …, "flow": "WEB"}` returns WebAuthn request options
+   (`challenge`, `rpId: "fpl.com"`, `allowCredentials`,
+   `userVerification: "required"`) plus an opaque server `session`.
+2. The page calls `navigator.credentials.get(…)`; the authenticator signs.
+3. `PUT` to the same path with the assertion (`id`, `rawId`, `type`,
+   `clientDataJSON`, `authenticatorData`, `signature`, `userHandle`) and the
+   echoed `session` / `userName`. Success is
+   `{"message":{"code":"login.success","message":"Log in successful"}}` with a
+   `jwttoken` response header and session cookies.
+
+Step 2 needs a real authenticator bound to `fpl.com`, so `fpl auth login
+--passkey` does **not** reimplement this over HTTP. It drives a Chromium-family
+browser over the DevTools protocol (`src/browser.rs`) with a persistent profile,
+lets native WebAuthn run, and treats either the `login.success` body on a `/cs/…
+login…` response or the tab reaching `/my-account/…` (with an authenticated API
+call carrying `jwttoken`) as success. It then captures the `jwttoken` and the
+`fpl.com` cookies, verifies them with `GET /cs/customer/v1/resources/header`,
+and saves them (`src/session.rs`) for `Fpl::from_session`. Response bodies are
+read only to check the result code and are never logged or stored.
+
+Email/password + one-time-code MFA in the browser is supported the same way:
+the user completes it in the window, and the URL signal detects success. MFA
+over the plain API login is not implemented because that challenge/response
+format is not documented here.
 
 Former **Gulf Power** accounts (Northwest Florida, "FL02") use an AWS Cognito
 SRP login against `cognito-idp.us-east-1.amazonaws.com` instead, and a separate

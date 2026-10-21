@@ -8,11 +8,14 @@
 //!
 //! Auth model: HTTP Basic on the login endpoint returns a `jwttoken` response
 //! header plus session cookies. Subsequent calls send that JWT in a `jwttoken`
-//! header and reuse the cookie jar.
+//! header and reuse the cookie jar. A passkey login (`fpl auth login
+//! --passkey`) happens in a browser instead; its captured JWT + cookies seed
+//! the same client via [`Fpl::from_session`].
 //!
 //! Northwest / former-Gulf-Power accounts ("FL02") use a different AWS Cognito
 //! login flow and are not supported yet.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -20,6 +23,7 @@ use serde_json::{json, Value};
 
 use crate::error::AppError;
 use crate::secrets::Secret;
+use crate::session::SavedSession;
 
 pub const API_HOST: &str = "https://www.fpl.com";
 
@@ -48,17 +52,22 @@ pub struct AccountSummary {
     pub balance: Option<String>,
 }
 
-fn build_client() -> Result<reqwest::blocking::Client, AppError> {
-    reqwest::blocking::Client::builder()
+fn build_client(
+    jar: Option<Arc<reqwest::cookie::Jar>>,
+) -> Result<reqwest::blocking::Client, AppError> {
+    let builder = reqwest::blocking::Client::builder()
         .user_agent(UA)
         // Total request budget, plus an explicit connect budget so a stalled
         // TCP/TLS handshake (which the overall `.timeout()` doesn't reliably
         // bound) fails fast instead of hanging.
         .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(15))
-        .cookie_store(true)
-        .build()
-        .map_err(|e| AppError::Other(format!("failed to build HTTP client: {e}")))
+        .connect_timeout(Duration::from_secs(15));
+    match jar {
+        Some(jar) => builder.cookie_provider(jar),
+        None => builder.cookie_store(true),
+    }
+    .build()
+    .map_err(|e| AppError::Other(format!("failed to build HTTP client: {e}")))
 }
 
 /// Pull a short human hint out of an error response body: a `message` /
@@ -99,7 +108,7 @@ fn url_for(path: &str) -> String {
 impl Fpl {
     /// Authenticate with FPL and capture the session JWT + cookies.
     pub fn login(username: &str, password: &Secret) -> Result<Fpl, AppError> {
-        let client = build_client()?;
+        let client = build_client(None)?;
         let resp = client
             .get(url_for(LOGIN_PATH))
             .basic_auth(username, Some(password.expose()))
@@ -124,6 +133,15 @@ impl Fpl {
         )))
     }
 
+    /// Resume a session captured by a browser (passkey) login: its cookies
+    /// seed the jar and its JWT, when present, rides in the `jwttoken` header.
+    pub fn from_session(session: &SavedSession) -> Result<Fpl, AppError> {
+        Ok(Fpl {
+            client: build_client(Some(session.jar()))?,
+            jwt: session.jwt.clone().unwrap_or_default(),
+        })
+    }
+
     fn auth_headers(
         &self,
         mut req: reqwest::blocking::RequestBuilder,
@@ -142,7 +160,8 @@ impl Fpl {
         let text = resp.text().unwrap_or_default();
         if matches!(status.as_u16(), 401 | 403) {
             return Err(AppError::Auth(format!(
-                "FPL returned {} for {path} — session expired. Run `fpl init` again.",
+                "FPL returned {} for {path} — session expired. Run `fpl init` again \
+                 (or `fpl auth login --passkey` for a passkey login).",
                 status.as_u16()
             )));
         }
@@ -565,7 +584,7 @@ impl Fpl {
 
 /// Fetch the public county outage feed (no auth required).
 pub fn county_outages() -> Result<Value, AppError> {
-    let client = build_client()?;
+    let client = build_client(None)?;
     let resp = client.get(OUTAGE_COUNTY_URL).send()?;
     if !resp.status().is_success() {
         return Err(AppError::Upstream(format!(
