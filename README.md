@@ -68,14 +68,7 @@ username: you@example.com
 account:  1234567890
 password: stored in keychain
 
-# Optionally open FPL's account login page as a browser helper:
-$ fpl auth login --browser
 ```
-
-`--browser` does not transfer the browser session or its MFA state to the CLI;
-credential verification still uses the documented API login. For a browser
-login the CLI *does* keep, see
-[Passkey / MFA login](#passkey--mfa-login-semi-automatic-browser-driven).
 
 To reset the stored account and password in the OS key-chain use:
 ```sh
@@ -99,12 +92,17 @@ If your FPL login uses a **passkey** (or you'd rather not store a password),
 sign in through a real browser window instead:
 
 ```sh
-$ fpl auth login --passkey --username you@example.com
+$ fpl auth login --passkey --username you@example.com # first run: browser opens, approve Touch ID / Windows Hello / PIN
 opened the FPL login page in the browser window
 requested passkey sign-in — approve the prompt (Touch ID, Windows Hello, security key, or phone) in the browser window
 signed in as you@example.com with a passkey; session saved to ~/.config/fpl-cli/browser-profile/fpl-session.json (expires …); active account 1234567890
 
-$ fpl summary        # reuses the saved session — no browser, no prompt
+$ fpl summary                                # reuses the saved session — no browser, no prompt
+$ fpl accounts balance  --json               # later runs: saved session, no prompt
+$ fpl list                                   # List the accounts on your login
+$ fpl accounts get --json                    # Show details for one account (defaults to the active account)
+$ fpl accounts -a "9854480150" balance.      # Show details for one specific account from list of accounts
+$ fpl auth login --passkey --reset-session   # force a fresh login
 ```
 
 **How it works.** A passkey is WebAuthn: FPL's challenge must be signed by an

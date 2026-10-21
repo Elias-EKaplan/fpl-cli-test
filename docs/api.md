@@ -30,10 +30,6 @@ Nothing here is guaranteed stable. FPL can change these at any time.
 2. **Authenticated calls** — send the `jwttoken` header and reuse the cookie jar.
 3. **Logout** — `GET /cs/customer/v1/registration/logout`.
 
-`fpl auth login --browser` opens FPL's account login page in the system browser
-as a helper, then follows the same CLI credential/API login flow. It does not
-transfer browser cookies or an authenticated browser session to the CLI.
-
 ### Passkey login (browser-driven)
 
 The web login page (`/my-account/login.html`) offers a passkey sign-in. It is

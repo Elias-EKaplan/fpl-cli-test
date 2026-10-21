@@ -206,13 +206,6 @@ pub enum AuthCommand {
 pub struct AuthLoginArgs {
     #[command(flatten)]
     pub init: InitArgs,
-    /// Open FPL's account login page in the default browser as a helper.
-    ///
-    /// The browser session is not transferred to the CLI; credential
-    /// verification still uses the FPL API login. See `--passkey` for a
-    /// browser login whose session the CLI keeps.
-    #[arg(long)]
-    pub browser: bool,
     #[command(flatten)]
     pub passkey: PasskeyArgs,
 }
@@ -229,7 +222,7 @@ pub struct PasskeyArgs {
     /// stored. Later commands reuse the saved session until it expires.
     #[arg(
         long,
-        conflicts_with_all = ["browser", "password_stdin", "password_from_env", "no_verify", "overwrite"]
+        conflicts_with_all = ["password_stdin", "password_from_env", "no_verify", "overwrite"]
     )]
     pub passkey: bool,
     /// Persistent browser profile directory (default: `browser-profile/`
@@ -437,13 +430,8 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn browser_flag_is_available_only_for_auth_login() {
-        let cli = Cli::try_parse_from(["fpl", "auth", "login", "--browser"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Auth(AuthCommand::Login(args)) if args.browser
-        ));
-
+    fn browser_helper_flag_is_not_available() {
+        assert!(Cli::try_parse_from(["fpl", "auth", "login", "--browser"]).is_err());
         assert!(Cli::try_parse_from(["fpl", "init", "--browser"]).is_err());
     }
 

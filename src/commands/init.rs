@@ -16,14 +16,6 @@ pub fn run_auth(ctx: &Ctx, args: &AuthLoginArgs) -> Result<(), AppError> {
     if args.passkey.passkey {
         return crate::commands::passkey::run(ctx, args);
     }
-    if args.browser {
-        open_fpl_login_page()?;
-        if !ctx.cli.quiet {
-            eprintln!(
-                "opened FPL account login page in the default browser; browser session is not transferred to the CLI"
-            );
-        }
-    }
     run(ctx, &args.init)
 }
 
@@ -96,37 +88,6 @@ pub fn run(ctx: &Ctx, args: &InitArgs) -> Result<(), AppError> {
             "verified": verified,
             "credential_length_chars": password_length,
         }));
-    }
-    Ok(())
-}
-
-fn open_fpl_login_page() -> Result<(), AppError> {
-    const LOGIN_PAGE: &str = "https://www.fpl.com/my-account.html";
-
-    #[cfg(target_os = "macos")]
-    let status = std::process::Command::new("open").arg(LOGIN_PAGE).status();
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let status = std::process::Command::new("xdg-open")
-        .arg(LOGIN_PAGE)
-        .status();
-
-    #[cfg(windows)]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", "", LOGIN_PAGE])
-        .status();
-
-    #[cfg(not(any(unix, windows)))]
-    return Err(AppError::Other(
-        "opening a browser is not supported on this platform".into(),
-    ));
-
-    let status = status
-        .map_err(|error| AppError::Other(format!("could not open the FPL login page: {error}")))?;
-    if !status.success() {
-        return Err(AppError::Other(format!(
-            "could not open the FPL login page (browser launcher exited with {status})"
-        )));
     }
     Ok(())
 }
