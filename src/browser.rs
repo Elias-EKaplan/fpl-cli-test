@@ -9,8 +9,9 @@
 //! 1. Launch the browser with a **persistent profile** (`--user-data-dir`), so
 //!    cookies, device trust, and any passkeys saved in that profile survive
 //!    between runs.
-//! 2. Open FPL's login page, fill the username, and click "sign in with
-//!    passkey". The browser shows its native passkey prompt; the user approves.
+//! 2. Open FPL's login page, fill the username, click "Continue", then "Log in
+//!    with passkey" (backing out of any passkey *setup* screen). The browser
+//!    shows its native passkey prompt; the user approves.
 //!    If the page can't be automated, the user finishes signing in by hand.
 //! 3. Watch for success: the `login.success` response from FPL's login API,
 //!    or the tab landing on a `/my-account/…` page with an authenticated API
@@ -47,6 +48,10 @@ const SETTLE_GRACE: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 /// After this long with no passkey button found, ask the user to finish by hand.
 const MANUAL_HINT_AFTER: Duration = Duration::from_secs(15);
+/// Minimum gap before repeating a Continue/Back click that didn't advance.
+const STEP_RETRY: Duration = Duration::from_secs(4);
+/// Cap on Continue and on Back clicks, so a page that loops can't trap us.
+const MAX_STEP_CLICKS: u8 = 3;
 const JWT_HEADER: &str = "jwttoken";
 
 /// Inputs for one browser login.
@@ -387,22 +392,53 @@ fn is_api_url(url: &str) -> bool {
     split_url(url).is_some_and(|(host, path)| is_fpl_host(&host) && path.starts_with("/cs/"))
 }
 
-/// The in-page helper: fill the username field and (when allowed) click the
-/// passkey button. Returns a JSON string `{filled, hasField, hasPasskey,
-/// clicked}`. Heuristic on purpose — FPL's markup drifts — and harmless when
-/// nothing matches: the user then finishes signing in by hand.
-fn automation_script(username: &str, allow_click: bool) -> String {
+/// Which page actions the in-page helper may take on this poll.
+#[derive(Clone, Copy, Debug, Default)]
+struct StepPermits {
+    /// Click "Log in with passkey" (the final step).
+    passkey: bool,
+    /// Submit the filled username with "Continue".
+    continue_: bool,
+    /// Leave a passkey *setup* screen with "Back".
+    back: bool,
+}
+
+/// The in-page helper. FPL's login is a multi-step flow: enter the username,
+/// press **Continue**, then press **Log in with passkey**. Other controls that
+/// mention passkeys (the "Use passkey…" link, "Create/Set up passkey") start
+/// passkey *registration*, so they are never clicked; if the page lands on a
+/// setup screen anyway, the helper presses **Back**, which returns to the
+/// passkey sign-in choice.
+///
+/// Returns a JSON string `{filled, hasField, hasPasskey, onSetup, clicked,
+/// continued, wentBack}`. Heuristic on purpose — FPL's markup drifts — and
+/// harmless when nothing matches: the user then finishes signing in by hand.
+fn automation_script(username: &str, permits: StepPermits) -> String {
     let user = serde_json::to_string(username).unwrap_or_else(|_| "\"\"".into());
+    let StepPermits {
+        passkey,
+        continue_,
+        back,
+    } = permits;
     format!(
         r#"(() => {{
   const user = {user};
-  const allowClick = {allow_click};
+  const allowPasskey = {passkey};
+  const allowContinue = {continue_};
+  const allowBack = {back};
   const visible = (el) => !!el && !el.disabled && el.getClientRects().length > 0
     && getComputedStyle(el).visibility !== 'hidden';
-  const label = (el) => [el.innerText, el.value, el.getAttribute('aria-label'),
-    el.getAttribute('title'), el.id, el.className]
-    .filter((x) => typeof x === 'string').join(' ');
-  const out = {{ filled: false, hasField: false, hasPasskey: false, clicked: false }};
+  const text = (el) => [el.innerText, el.value, el.getAttribute('aria-label'),
+    el.getAttribute('title')].filter((x) => typeof x === 'string').join(' ')
+    .replace(/\s+/g, ' ').trim();
+  const meta = (el) => [el.id, typeof el.className === 'string' ? el.className : '']
+    .join(' ');
+  const out = {{ filled: false, hasField: false, hasPasskey: false, onSetup: false,
+    clicked: false, continued: false, wentBack: false }};
+  const controls = Array.from(document.querySelectorAll(
+    'button, a, [role="button"], input[type="button"], input[type="submit"]')).filter(visible);
+  const setupRe = /(create|set\s*-?\s*up|setting\s+up|register)\b[^.]{{0,20}}pass\s*-?key|pass\s*-?key[\s-]*(setup|registration)/i;
+
   const field = Array.from(document.querySelectorAll('input')).filter(visible).find((i) => {{
     const t = (i.getAttribute('type') || 'text').toLowerCase();
     if (!['text', 'email'].includes(t)) return false;
@@ -419,12 +455,32 @@ fn automation_script(username: &str, allow_click: bool) -> String {
       out.filled = true;
     }}
   }}
-  const btn = Array.from(document.querySelectorAll(
-    'button, a, [role="button"], input[type="button"], input[type="submit"]'))
-    .filter(visible).find((b) => /pass\s*-?key/i.test(label(b)));
-  if (btn) {{
+
+  // A passkey *setup* screen: setup controls or setup copy on show.
+  out.onSetup = controls.some((c) => setupRe.test(text(c)))
+    || setupRe.test((document.body && document.body.innerText) || '');
+
+  // 1. The sign-in button itself — "Log in / Sign in with passkey" only.
+  const passkeyBtn = controls.find((c) =>
+    /(log\s*-?\s*in|sign\s*-?\s*in)\s+(with\s+)?(a\s+|your\s+)?pass\s*-?key/i.test(text(c))
+    && !setupRe.test(text(c)) && !/setup|regist/i.test(meta(c)));
+  if (passkeyBtn) {{
     out.hasPasskey = true;
-    if (allowClick && !out.filled) {{ btn.click(); out.clicked = true; }}
+    if (allowPasskey && !out.filled) {{ passkeyBtn.click(); out.clicked = true; }}
+    return JSON.stringify(out);
+  }}
+
+  // 2. Landed on passkey setup: go back to the sign-in choice.
+  if (out.onSetup) {{
+    const backBtn = controls.find((c) => /^(go\s+)?back$/i.test(text(c)));
+    if (backBtn && allowBack) {{ backBtn.click(); out.wentBack = true; }}
+    return JSON.stringify(out);
+  }}
+
+  // 3. Username entered: press "Continue" to reach the passkey step.
+  if (field && field.value && !out.filled) {{
+    const cont = controls.find((c) => /^continue$/i.test(text(c)));
+    if (cont && allowContinue) {{ cont.click(); out.continued = true; }}
   }}
   return JSON.stringify(out);
 }})()"#
@@ -451,6 +507,10 @@ fn wait_for_login(cdp: &mut Cdp, opts: &LoginOptions) -> Result<Option<String>, 
     let mut t = LoginTracker::default();
     let mut clicked = false;
     let mut filled_at: Option<Instant> = None;
+    let mut stepped_at: Option<Instant> = None;
+    let mut continues = 0u8;
+    let mut backs = 0u8;
+    let mut hinted_setup = false;
     let mut hinted_manual = false;
     let mut hinted_rejected = None;
     let mut last_poll: Option<Instant> = None;
@@ -514,16 +574,44 @@ fn wait_for_login(cdp: &mut Cdp, opts: &LoginOptions) -> Result<Option<String>, 
             }
             let on_account = t.account_url_since.is_some();
             if !clicked && t.success_at.is_none() && !on_account {
-                let allow_click = filled_at.map_or(true, |f| f.elapsed() >= Duration::from_secs(1));
-                let script = automation_script(&opts.username, allow_click);
+                let since =
+                    |at: Option<Instant>, d: Duration| at.map_or(true, |a| a.elapsed() >= d);
+                let settled = since(filled_at, Duration::from_secs(1))
+                    && since(stepped_at, Duration::from_secs(1));
+                let step_ok = settled && since(stepped_at, STEP_RETRY);
+                let permits = StepPermits {
+                    passkey: settled,
+                    continue_: step_ok && continues < MAX_STEP_CLICKS,
+                    back: step_ok && backs < MAX_STEP_CLICKS,
+                };
+                let script = automation_script(&opts.username, permits);
                 let state: Value = eval_string(cdp, &script)
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or(Value::Null);
-                if state.get("filled").and_then(|v| v.as_bool()) == Some(true) {
+                let flag = |k: &str| state.get(k).and_then(|v| v.as_bool()) == Some(true);
+                if flag("filled") {
                     filled_at = Some(Instant::now());
                     opts.debug("filled the username field");
                 }
-                if state.get("clicked").and_then(|v| v.as_bool()) == Some(true) {
+                if flag("continued") {
+                    continues += 1;
+                    stepped_at = Some(Instant::now());
+                    opts.debug("pressed Continue");
+                }
+                if flag("wentBack") {
+                    backs += 1;
+                    stepped_at = Some(Instant::now());
+                    opts.debug("left the passkey setup screen with Back");
+                }
+                if flag("onSetup") && !flag("wentBack") && !hinted_setup && backs >= MAX_STEP_CLICKS
+                {
+                    hinted_setup = true;
+                    opts.note(
+                        "FPL keeps showing passkey setup — press Back, then \"Log in with \
+                         passkey\" in the browser window",
+                    );
+                }
+                if flag("clicked") {
                     clicked = true;
                     opts.note(
                         "requested passkey sign-in — approve the prompt (Touch ID, Windows \
@@ -1116,10 +1204,20 @@ mod tests {
     }
 
     #[test]
-    fn automation_script_embeds_username_as_a_js_string() {
-        let s = automation_script("a\"b@example.com", true);
+    fn automation_script_embeds_username_and_permits() {
+        let all = StepPermits {
+            passkey: true,
+            continue_: true,
+            back: true,
+        };
+        let s = automation_script("a\"b@example.com", all);
         assert!(s.contains(r#"const user = "a\"b@example.com";"#));
-        assert!(s.contains("const allowClick = true;"));
-        assert!(automation_script("x", false).contains("const allowClick = false;"));
+        assert!(s.contains("const allowPasskey = true;"));
+        assert!(s.contains("const allowContinue = true;"));
+        assert!(s.contains("const allowBack = true;"));
+        let none = automation_script("x", StepPermits::default());
+        assert!(none.contains("const allowPasskey = false;"));
+        assert!(none.contains("const allowContinue = false;"));
+        assert!(none.contains("const allowBack = false;"));
     }
 }

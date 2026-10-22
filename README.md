@@ -114,8 +114,9 @@ Chromium over the DevTools protocol:
    `browser-profile/` beside the config file), so cookies, device trust, and
    passkeys saved in that profile survive between runs.
 2. It opens `https://www.fpl.com/my-account/login.html`, fills your username,
-   and clicks **sign in with passkey**. The browser shows its native passkey
-   prompt; you approve it.
+   clicks **Continue**, then **Log in with passkey** (if FPL detours to a
+   passkey *setup* screen, it clicks **Back** — it never registers a passkey).
+   The browser shows its native passkey prompt; you approve it.
 3. It watches for success — FPL's `login.success` response from the passkey
    endpoint, or the tab landing on a `/my-account/…` page — then captures the
    session (`jwttoken` + `fpl.com` cookies), checks it against FPL's API, and

@@ -217,7 +217,7 @@ pub struct PasskeyArgs {
     /// Chromium), then reuse that session for later commands.
     ///
     /// The CLI opens FPL's login page with a persistent browser profile, fills
-    /// your username, and clicks "sign in with passkey"; you approve the
+    /// your username, clicks "Continue", then "Log in with passkey"; you approve the
     /// prompt (Touch ID, Windows Hello, security key, or phone). No password is
     /// stored. Later commands reuse the saved session until it expires.
     #[arg(
