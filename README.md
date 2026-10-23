@@ -101,9 +101,33 @@ $ fpl summary                                # reuses the saved session — no b
 $ fpl accounts balance  --json               # later runs: saved session, no prompt
 $ fpl list                                   # List the accounts on your login
 $ fpl accounts get --json                    # Show details for one account (defaults to the active account)
-$ fpl accounts -a "9854480150" balance.      # Show details for one specific account from list of accounts
+$ fpl accounts -a "1234567890" balance.      # Show details for one specific account from list of accounts
 $ fpl auth login --passkey --reset-session   # force a fresh login
 ```
+
+**Password + one-time code (MFA).** If your account asks for a one-time code
+after the password, use `--mfa` (also `--MFA`) instead of `--passkey`. `fpl`
+asks for the password like `fpl init` does (or reads it from `--password-stdin`
+/ `--password-from-env <VAR>`), opens the same browser window, fills your
+username → **Continue** → password → **Log in**, and you type the one-time code
+in the window. When FPL lands on your account, the session is captured and saved
+exactly as with a passkey:
+
+```sh
+$ fpl init --mfa --username you@example.com    # prompts for the password; you enter the code in the browser, 
+## or better use:
+$ fpl auth login --MFA --username you@example.com # first run: browser opens, MFA code is needed if password is accepted, waits 5 minutes for MFA to be type.
+FPL password for you@example.com:
+opened the FPL login page in the browser window
+submitted your username and password — enter the one-time code (MFA) in the browser window; the CLI is watching for success
+signed in as you@example.com with password + one-time code; session saved to ~/.config/fpl-cli/browser-profile/fpl-session.json (expires …); active account 1234567890
+
+$ fpl auth login --mfa --reset-session         # same, with the browser options below
+```
+
+The password is only typed into FPL's page — it is **not** stored in the
+keychain (the plain API login can't answer the MFA challenge). Re-run
+`fpl init --mfa` when the session expires.
 
 **How it works.** A passkey is WebAuthn: FPL's challenge must be signed by an
 authenticator you control, so it can't be scripted over plain HTTP (and `fpl`
@@ -116,7 +140,9 @@ Chromium over the DevTools protocol:
 2. It opens `https://www.fpl.com/my-account/login.html`, fills your username,
    clicks **Continue**, then **Log in with passkey** (if FPL detours to a
    passkey *setup* screen, it clicks **Back** — it never registers a passkey).
-   The browser shows its native passkey prompt; you approve it.
+   The browser shows its native passkey prompt; you approve it. With `--mfa`
+   it instead fills the password, clicks **Log in**, and waits for you to enter
+   the one-time code.
 3. It watches for success — FPL's `login.success` response from the passkey
    endpoint, or the tab landing on a `/my-account/…` page — then captures the
    session (`jwttoken` + `fpl.com` cookies), checks it against FPL's API, and
@@ -133,7 +159,7 @@ just finish signing in in that window; it keeps watching for success.
 **Later runs.** Ordinary commands reuse the saved session without opening a
 browser. When it lapses, they exit `3` with a hint (or, if a password is also
 in the keychain, quietly fall back to the password login). Re-running
-`fpl auth login --passkey` reuses the profile, so if FPL still trusts that
+`fpl auth login --passkey` (or `fpl init --mfa`) reuses the profile, so if FPL still trusts that
 browser it completes with little or no prompting. `fpl auth status` shows the
 session and its expiry; `fpl auth logout` deletes the saved session.
 
@@ -141,8 +167,8 @@ session and its expiry; `fpl auth logout` deletes the saved session.
 |--------|------------|---------|
 | `--profile-dir <DIR>` (or `$FPL_BROWSER_PROFILE`) | `browser_profile_dir` | Persistent browser profile + saved session location |
 | `--browser-path <EXE>` (or `$FPL_BROWSER`) | `browser_path` | Browser to drive (default: auto-detect Chrome → Edge → Brave → Chromium) |
-| `--timeout <SECS>` | `browser_timeout` | How long to wait for the sign-in (default `180`) |
-| `--headless` | — | No window; only succeeds while the profile is still signed in (passkey prompts need a window) |
+| `--timeout <SECS>` | `browser_timeout` | How long to wait for the sign-in (default `180`; `300` with `--mfa`) |
+| `--headless` | — | No window; only succeeds while the profile is still signed in (passkey and one-time-code prompts need a window) |
 | `--reset-session` | — | Discard the saved session and clear FPL cookies in the profile, forcing a fresh sign-in |
 | `--login-url <URL>` | — | Override the login page if FPL moves it |
 
@@ -363,7 +389,7 @@ fpl api GET https://www.fplmaps.com/customer/outage/CountyOutages.json \
 | `FPL_USERNAME` | Default login email |
 | `FPL_ACCOUNT` | Default account number |
 | `FPL_BROWSER_PROFILE` | Browser profile directory for passkey login (and its saved session) |
-| `FPL_BROWSER` | Browser executable for `auth login --passkey` |
+| `FPL_BROWSER` | Browser executable for `auth login --passkey` / `--mfa` |
 
 Secrets never enter through an env var the CLI reads at runtime — pass them to
 `init`/`set-credential` via `--password-from-env` / `--from-env` at setup time.

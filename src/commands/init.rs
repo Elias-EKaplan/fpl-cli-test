@@ -1,10 +1,11 @@
 //! `fpl init` — flag-driven first-time setup. Verifies credentials and stores
 //! the password in the keychain. Fully scriptable: the password enters via
-//! `--password-stdin` or `--password-from-env`, never a flag value.
+//! `--password-stdin` or `--password-from-env`, never a flag value. With
+//! `--mfa` it hands off to the browser login instead (see `passkey.rs`).
 
 use serde_json::json;
 
-use crate::cli::{AuthLoginArgs, InitArgs};
+use crate::cli::{AuthLoginArgs, InitArgs, PasskeyArgs};
 use crate::client::Fpl;
 use crate::commands::{prompt_line, stdin_is_tty, Ctx, SERVICE};
 use crate::config::Config;
@@ -13,13 +14,16 @@ use crate::output;
 use crate::secrets::{self, CredentialStore, Secret};
 
 pub fn run_auth(ctx: &Ctx, args: &AuthLoginArgs) -> Result<(), AppError> {
-    if args.passkey.passkey {
-        return crate::commands::passkey::run(ctx, args);
+    if args.passkey.passkey || args.init.mfa {
+        return crate::commands::passkey::run(ctx, &args.init, &args.passkey);
     }
     run(ctx, &args.init)
 }
 
 pub fn run(ctx: &Ctx, args: &InitArgs) -> Result<(), AppError> {
+    if args.mfa {
+        return crate::commands::passkey::run(ctx, args, &PasskeyArgs::default());
+    }
     let interactive = !args.non_interactive && stdin_is_tty();
 
     let username = match ctx
@@ -92,7 +96,11 @@ pub fn run(ctx: &Ctx, args: &InitArgs) -> Result<(), AppError> {
     Ok(())
 }
 
-fn ingest_password(args: &InitArgs, username: &str, interactive: bool) -> Result<Secret, AppError> {
+pub(crate) fn ingest_password(
+    args: &InitArgs,
+    username: &str,
+    interactive: bool,
+) -> Result<Secret, AppError> {
     match (args.password_stdin, &args.password_from_env) {
         (true, Some(_)) => Err(AppError::Usage(
             "--password-stdin and --password-from-env are mutually exclusive".into(),

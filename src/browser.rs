@@ -33,12 +33,15 @@ use serde_json::{json, Value};
 use tungstenite::{Message, WebSocket};
 
 use crate::error::AppError;
+use crate::secrets::Secret;
 use crate::session::{self, SavedSession, SessionCookie};
 
 /// FPL's account login page (offers passkey, or email/password + one-time code).
 pub const LOGIN_URL: &str = "https://www.fpl.com/my-account/login.html";
 /// Default time allowed for the user to approve the passkey prompt.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 180;
+/// Default wait for `--mfa`: the one-time code has to arrive and be typed.
+pub const DEFAULT_MFA_TIMEOUT_SECS: u64 = 300;
 
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -50,13 +53,30 @@ const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const MANUAL_HINT_AFTER: Duration = Duration::from_secs(15);
 /// Minimum gap before repeating a Continue/Back click that didn't advance.
 const STEP_RETRY: Duration = Duration::from_secs(4);
+/// MFA: how often to re-check a candidate session while the user types the code.
+const MFA_PROBE_EVERY: Duration = Duration::from_secs(5);
 /// Cap on Continue and on Back clicks, so a page that loops can't trap us.
 const MAX_STEP_CLICKS: u8 = 3;
 const JWT_HEADER: &str = "jwttoken";
 
+/// How the browser login proceeds after the username step.
+pub enum LoginMethod {
+    /// Click "Log in with passkey"; the user approves the WebAuthn prompt.
+    Passkey,
+    /// Fill the password and submit; the user enters the one-time code (MFA).
+    Mfa(Secret),
+}
+
+impl LoginMethod {
+    fn is_mfa(&self) -> bool {
+        matches!(self, LoginMethod::Mfa(_))
+    }
+}
+
 /// Inputs for one browser login.
 pub struct LoginOptions {
     pub username: String,
+    pub method: LoginMethod,
     pub profile_dir: PathBuf,
     pub browser_path: Option<PathBuf>,
     pub headless: bool,
@@ -164,10 +184,24 @@ pub fn is_account_url(url: &str) -> bool {
     };
     let path = path.to_ascii_lowercase();
     is_fpl_host(&host)
-        && path.starts_with("/my-account/")
-        && !["login", "logout", "register", "forgot", "reset", "passkey"]
-            .iter()
-            .any(|w| path.contains(w))
+        && (path.starts_with("/my-account/") || path.starts_with("/fpl-app/my-account/"))
+        && ![
+            "login",
+            "logout",
+            "register",
+            "forgot",
+            "reset",
+            "passkey",
+            "mfa",
+            "otp",
+            "verif",
+            "one-time",
+            "onetime",
+            "2fa",
+            "challenge",
+        ]
+        .iter()
+        .any(|w| path.contains(w))
 }
 
 /// Whether a request URL is one of FPL's login API calls (passkey challenge /
@@ -395,7 +429,9 @@ fn is_api_url(url: &str) -> bool {
 /// Which page actions the in-page helper may take on this poll.
 #[derive(Clone, Copy, Debug, Default)]
 struct StepPermits {
-    /// Click "Log in with passkey" (the final step).
+    /// MFA mode: take the password route instead of the passkey button.
+    mfa: bool,
+    /// Click "Log in with passkey", or (MFA) submit the filled password.
     passkey: bool,
     /// Submit the filled username with "Continue".
     continue_: bool,
@@ -410,12 +446,20 @@ struct StepPermits {
 /// setup screen anyway, the helper presses **Back**, which returns to the
 /// passkey sign-in choice.
 ///
+/// In MFA mode the passkey button is ignored: after Continue the helper opens
+/// the password route (if it is behind a link), reports `needsPassword` when
+/// an empty password field is showing — the caller then runs
+/// [`fill_password_script`] — and presses **Log in** once it is filled. The
+/// one-time code that follows is left to the user.
+///
 /// Returns a JSON string `{filled, hasField, hasPasskey, onSetup, clicked,
-/// continued, wentBack}`. Heuristic on purpose — FPL's markup drifts — and
-/// harmless when nothing matches: the user then finishes signing in by hand.
+/// continued, wentBack, needsPassword}`. Heuristic on purpose — FPL's markup
+/// drifts — and harmless when nothing matches: the user then finishes signing
+/// in by hand.
 fn automation_script(username: &str, permits: StepPermits) -> String {
     let user = serde_json::to_string(username).unwrap_or_else(|_| "\"\"".into());
     let StepPermits {
+        mfa,
         passkey,
         continue_,
         back,
@@ -423,6 +467,7 @@ fn automation_script(username: &str, permits: StepPermits) -> String {
     format!(
         r#"(() => {{
   const user = {user};
+  const mfa = {mfa};
   const allowPasskey = {passkey};
   const allowContinue = {continue_};
   const allowBack = {back};
@@ -434,9 +479,9 @@ fn automation_script(username: &str, permits: StepPermits) -> String {
   const meta = (el) => [el.id, typeof el.className === 'string' ? el.className : '']
     .join(' ');
   const out = {{ filled: false, hasField: false, hasPasskey: false, onSetup: false,
-    clicked: false, continued: false, wentBack: false }};
-  const controls = Array.from(document.querySelectorAll(
-    'button, a, [role="button"], input[type="button"], input[type="submit"]')).filter(visible);
+    clicked: false, continued: false, wentBack: false, needsPassword: false }};
+  const sel = 'button, a, [role="button"], input[type="button"], input[type="submit"]';
+  const controls = Array.from(document.querySelectorAll(sel)).filter(visible);
   const setupRe = /(create|set\s*-?\s*up|setting\s+up|register)\b[^.]{{0,20}}pass\s*-?key|pass\s*-?key[\s-]*(setup|registration)/i;
 
   const field = Array.from(document.querySelectorAll('input')).filter(visible).find((i) => {{
@@ -460,12 +505,12 @@ fn automation_script(username: &str, permits: StepPermits) -> String {
   out.onSetup = controls.some((c) => setupRe.test(text(c)))
     || setupRe.test((document.body && document.body.innerText) || '');
 
-  // 1. The sign-in button itself — "Log in / Sign in with passkey" only.
+  // 1. Passkey mode: the sign-in button itself — "Log in / Sign in with passkey" only.
   const passkeyBtn = controls.find((c) =>
     /(log\s*-?\s*in|sign\s*-?\s*in)\s+(with\s+)?(a\s+|your\s+)?pass\s*-?key/i.test(text(c))
     && !setupRe.test(text(c)) && !/setup|regist/i.test(meta(c)));
-  if (passkeyBtn) {{
-    out.hasPasskey = true;
+  if (passkeyBtn) out.hasPasskey = true;
+  if (passkeyBtn && !mfa) {{
     if (allowPasskey && !out.filled) {{ passkeyBtn.click(); out.clicked = true; }}
     return JSON.stringify(out);
   }}
@@ -477,7 +522,32 @@ fn automation_script(username: &str, permits: StepPermits) -> String {
     return JSON.stringify(out);
   }}
 
-  // 3. Username entered: press "Continue" to reach the passkey step.
+  // 3. MFA mode: the password step. The caller fills an empty field; once
+  //    filled, press the nearest "Log in" (not the header's LOG IN link).
+  if (mfa) {{
+    const pw = Array.from(document.querySelectorAll('input[type="password"]')).find(visible);
+    if (pw) {{
+      if (!pw.value) {{ out.needsPassword = true; return JSON.stringify(out); }}
+      const submitRe = /^(log\s*-?\s*in|sign\s*-?\s*in|continue|next|submit)$/i;
+      let node = pw.parentElement, submit = null;
+      while (node && !submit) {{
+        submit = Array.from(node.querySelectorAll(sel)).filter(visible)
+          .find((c) => submitRe.test(text(c)));
+        node = node.parentElement;
+      }}
+      if (submit && allowPasskey && !out.filled) {{ submit.click(); out.clicked = true; }}
+      return JSON.stringify(out);
+    }}
+    const usePw = controls.find((c) =>
+      /(enter|use)\s+(your\s+)?password|(log\s*-?\s*in|sign\s*-?\s*in)\s+with\s+(your\s+)?password/i
+        .test(text(c)) && !/forgot|reset/i.test(text(c)));
+    if (usePw) {{
+      if (allowContinue) {{ usePw.click(); out.continued = true; }}
+      return JSON.stringify(out);
+    }}
+  }}
+
+  // 4. Username entered: press "Continue" to reach the next step.
   if (field && field.value && !out.filled) {{
     const cont = controls.find((c) => /^continue$/i.test(text(c)));
     if (cont && allowContinue) {{ cont.click(); out.continued = true; }}
@@ -485,6 +555,28 @@ fn automation_script(username: &str, permits: StepPermits) -> String {
   return JSON.stringify(out);
 }})()"#
     )
+}
+
+/// Fill the visible, empty password field (MFA mode). Kept separate from
+/// [`automation_script`] so the password is sent to the page only when a
+/// password field is showing; the script text is zeroized on drop.
+fn fill_password_script(password: &Secret) -> Secret {
+    let pw = serde_json::to_string(password.expose()).unwrap_or_else(|_| "\"\"".into());
+    let script = format!(
+        r#"(() => {{
+  const visible = (el) => !!el && !el.disabled && el.getClientRects().length > 0
+    && getComputedStyle(el).visibility !== 'hidden';
+  const pw = Array.from(document.querySelectorAll('input[type="password"]')).find(visible);
+  if (!pw || pw.value) return 'skipped';
+  pw.focus();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  setter.call(pw, {pw});
+  for (const t of ['input', 'change', 'blur']) pw.dispatchEvent(new Event(t, {{ bubbles: true }}));
+  return 'filled';
+}})()"#
+    );
+    drop(Secret::new(pw));
+    Secret::new(script)
 }
 
 /// Evaluate an expression in the page and return its string value.
@@ -514,15 +606,22 @@ fn wait_for_login(cdp: &mut Cdp, opts: &LoginOptions) -> Result<Option<String>, 
     let mut hinted_manual = false;
     let mut hinted_rejected = None;
     let mut last_poll: Option<Instant> = None;
+    let mut last_probe: Option<Instant> = None;
+    let mut hinted_mfa_wait = false;
     let mut log = |line: String| opts.debug(&line);
 
     loop {
         let now = Instant::now();
         if now >= deadline {
             return Err(AppError::Auth(format!(
-                "timed out after {}s waiting for the FPL login to finish — approve the \
-                 passkey prompt in the browser window, or raise --timeout",
-                opts.timeout.as_secs()
+                "timed out after {}s waiting for the FPL login to finish — {}, or raise \
+                 --timeout",
+                opts.timeout.as_secs(),
+                if opts.method.is_mfa() {
+                    "enter the one-time code in the browser window"
+                } else {
+                    "approve the passkey prompt in the browser window"
+                }
             )));
         }
 
@@ -580,6 +679,7 @@ fn wait_for_login(cdp: &mut Cdp, opts: &LoginOptions) -> Result<Option<String>, 
                     && since(stepped_at, Duration::from_secs(1));
                 let step_ok = settled && since(stepped_at, STEP_RETRY);
                 let permits = StepPermits {
+                    mfa: opts.method.is_mfa(),
                     passkey: settled,
                     continue_: step_ok && continues < MAX_STEP_CLICKS,
                     back: step_ok && backs < MAX_STEP_CLICKS,
@@ -606,33 +706,87 @@ fn wait_for_login(cdp: &mut Cdp, opts: &LoginOptions) -> Result<Option<String>, 
                 if flag("onSetup") && !flag("wentBack") && !hinted_setup && backs >= MAX_STEP_CLICKS
                 {
                     hinted_setup = true;
-                    opts.note(
+                    opts.note(if opts.method.is_mfa() {
+                        "FPL keeps showing passkey setup — press Back, then sign in with \
+                         your password in the browser window"
+                    } else {
                         "FPL keeps showing passkey setup — press Back, then \"Log in with \
-                         passkey\" in the browser window",
-                    );
+                         passkey\" in the browser window"
+                    });
+                }
+                if let (true, LoginMethod::Mfa(password)) = (flag("needsPassword"), &opts.method) {
+                    let script = fill_password_script(password);
+                    if eval_string(cdp, script.expose()).as_deref() == Some("filled") {
+                        filled_at = Some(Instant::now());
+                        opts.debug("filled the password field");
+                    }
                 }
                 if flag("clicked") {
                     clicked = true;
-                    opts.note(
+                    opts.note(if opts.method.is_mfa() {
+                        "submitted your username and password — enter the one-time code \
+                         (MFA) in the browser window; the CLI is watching for success"
+                    } else {
                         "requested passkey sign-in — approve the prompt (Touch ID, Windows \
-                         Hello, security key, or phone) in the browser window",
-                    );
+                         Hello, security key, or phone) in the browser window"
+                    });
                 } else if !hinted_manual && started.elapsed() >= MANUAL_HINT_AFTER {
                     hinted_manual = true;
-                    opts.note(
+                    opts.note(if opts.method.is_mfa() {
+                        "couldn't reach the password step automatically — finish signing \
+                         in in the browser window (password + one-time code); the CLI is \
+                         watching for success"
+                    } else {
                         "couldn't find a passkey button automatically — finish signing in \
                          in the browser window (passkey, or password + one-time code); \
-                         the CLI is watching for success",
-                    );
+                         the CLI is watching for success"
+                    });
                 }
             }
         }
 
         if t.is_done(Instant::now()) {
+            // The password step alone can look like success (a `login.success`
+            // body or an interim `/my-account/…` page) while FPL still wants the
+            // one-time code, so MFA only finishes once the session really works.
+            if opts.method.is_mfa() {
+                if last_probe.is_some_and(|p| p.elapsed() < MFA_PROBE_EVERY) {
+                    continue;
+                }
+                last_probe = Some(Instant::now());
+                if !session_works(cdp, opts, t.jwt.clone()) {
+                    opts.debug("session not accepted yet; still waiting for the one-time code");
+                    if !hinted_mfa_wait {
+                        hinted_mfa_wait = true;
+                        opts.note(
+                            "waiting for the one-time code — enter it in the browser window; \
+                             the CLI keeps watching until you're signed in",
+                        );
+                    }
+                    continue;
+                }
+            }
             opts.debug(&format!("signed in (now at {})", redact_url(&t.url)));
             return Ok(t.jwt);
         }
     }
+}
+
+/// Whether the browser's current FPL cookies (+ token) pass an authenticated
+/// API call — i.e. the sign-in, including any one-time code, is complete.
+fn session_works(cdp: &mut Cdp, opts: &LoginOptions, jwt: Option<String>) -> bool {
+    let Ok(raw) = cdp.call(
+        "Network.getCookies",
+        json!({ "urls": ["https://www.fpl.com/", "https://fpl.com/"] }),
+    ) else {
+        return false;
+    };
+    let cookies = parse_cookies(&raw);
+    let jwt = jwt.or_else(|| jwt_from_cookies(&cookies));
+    let candidate = SavedSession::new(&opts.username, jwt, cookies);
+    crate::client::Fpl::from_session(&candidate)
+        .and_then(|f| f.header())
+        .is_ok()
 }
 
 // ---- Browser process & DevTools transport ----------------------------------
@@ -981,6 +1135,20 @@ mod tests {
         assert!(is_account_url(
             "https://www.fpl.com/my-account/account-landing.html?x=1#top"
         ));
+        assert!(is_account_url(
+            "https://www.fpl.com/fpl-app/my-account/account-summary"
+        ));
+        assert!(!is_account_url(
+            "https://www.fpl.com/fpl-app/my-account/login"
+        ));
+        for mfa_page in [
+            "https://www.fpl.com/fpl-app/my-account/mfa",
+            "https://www.fpl.com/fpl-app/my-account/verify-identity",
+            "https://www.fpl.com/my-account/one-time-code.html",
+            "https://www.fpl.com/fpl-app/my-account/otp",
+        ] {
+            assert!(!is_account_url(mfa_page), "{mfa_page}");
+        }
         assert!(!is_account_url("https://www.fpl.com/my-account/login.html"));
         assert!(!is_account_url(
             "https://www.fpl.com/my-account/forgot-password.html"
@@ -1206,6 +1374,7 @@ mod tests {
     #[test]
     fn automation_script_embeds_username_and_permits() {
         let all = StepPermits {
+            mfa: true,
             passkey: true,
             continue_: true,
             back: true,
@@ -1215,9 +1384,18 @@ mod tests {
         assert!(s.contains("const allowPasskey = true;"));
         assert!(s.contains("const allowContinue = true;"));
         assert!(s.contains("const allowBack = true;"));
+        assert!(s.contains("const mfa = true;"));
         let none = automation_script("x", StepPermits::default());
         assert!(none.contains("const allowPasskey = false;"));
         assert!(none.contains("const allowContinue = false;"));
         assert!(none.contains("const allowBack = false;"));
+        assert!(none.contains("const mfa = false;"));
+    }
+
+    #[test]
+    fn password_script_embeds_password_as_json_literal() {
+        let s = fill_password_script(&Secret::new("p\"w'</script>"));
+        assert!(s.expose().contains(r#"setter.call(pw, "p\"w'</script>");"#));
+        assert!(s.expose().contains("input[type=\"password\"]"));
     }
 }

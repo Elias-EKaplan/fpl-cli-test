@@ -56,8 +56,11 @@ call carrying `jwttoken`) as success. It then captures the `jwttoken` and the
 and saves them (`src/session.rs`) for `Fpl::from_session`. Response bodies are
 read only to check the result code and are never logged or stored.
 
-Email/password + one-time-code MFA in the browser is supported the same way:
-the user completes it in the window, and the URL signal detects success. MFA
+Email/password + one-time-code MFA in the browser is supported the same way
+(`fpl init --mfa` / `fpl auth login --mfa`): the driver fills the username and
+password and submits the form, the user enters the code in the window, and the
+URL signal (`/my-account/…` or `/fpl-app/my-account/…`) detects success. The
+password is typed into the page only, never stored. MFA
 over the plain API login is not implemented because that challenge/response
 format is not documented here.
 

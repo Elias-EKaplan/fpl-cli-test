@@ -159,6 +159,14 @@ pub struct InitArgs {
     /// Never prompt; fail if a required input is missing.
     #[arg(long)]
     pub non_interactive: bool,
+    /// Sign in through a browser window with username + password, then enter
+    /// the one-time code (MFA) yourself; the CLI keeps that browser session.
+    ///
+    /// The password is read like a normal `init` (prompt, `--password-stdin`,
+    /// or `--password-from-env`), typed into FPL's login page, and not stored.
+    /// Later commands reuse the saved session until it expires.
+    #[arg(long, alias = "MFA", conflicts_with_all = ["no_verify", "overwrite"])]
+    pub mfa: bool,
     /// Emit the result as JSON on stdout (confirmation still goes to stderr).
     #[arg(long)]
     pub json: bool,
@@ -183,7 +191,8 @@ pub struct SetCredentialArgs {
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
     /// Verify credentials and store them in the keychain (same as `fpl init`),
-    /// or sign in with a passkey in a browser window (`--passkey`).
+    /// or sign in in a browser window with a passkey (`--passkey`) or with
+    /// password + one-time code (`--mfa`).
     Login(AuthLoginArgs),
     /// Write a single credential to the keychain (rotation / headless setup).
     SetCredential(SetCredentialArgs),
@@ -202,7 +211,9 @@ pub enum AuthCommand {
     },
 }
 
+/// `--passkey` and `--mfa` are the browser logins; browser-only knobs need one.
 #[derive(Args, Debug)]
+#[command(group = clap::ArgGroup::new("browser_login").multiple(true).args(["passkey", "mfa"]))]
 pub struct AuthLoginArgs {
     #[command(flatten)]
     pub init: InitArgs,
@@ -222,7 +233,7 @@ pub struct PasskeyArgs {
     /// stored. Later commands reuse the saved session until it expires.
     #[arg(
         long,
-        conflicts_with_all = ["password_stdin", "password_from_env", "no_verify", "overwrite"]
+        conflicts_with_all = ["mfa", "password_stdin", "password_from_env", "no_verify", "overwrite"]
     )]
     pub passkey: bool,
     /// Persistent browser profile directory (default: `browser-profile/`
@@ -234,21 +245,23 @@ pub struct PasskeyArgs {
     /// `browser_path`).
     #[arg(long, value_name = "EXE", env = "FPL_BROWSER")]
     pub browser_path: Option<String>,
-    /// Run the browser without a window. Passkey prompts can't appear, so this
-    /// only works while the profile is still signed in to FPL.
-    #[arg(long, requires = "passkey")]
+    /// Run the browser without a window. Passkey and one-time-code prompts
+    /// can't be answered, so this only works while the profile is still signed
+    /// in to FPL.
+    #[arg(long, requires = "browser_login")]
     pub headless: bool,
-    /// Seconds to wait for the login to finish (default: 180, or config
+    /// Seconds to wait for the login to finish (default: 180, 300 with
+    /// `--mfa`, or config
     /// `browser_timeout`).
-    #[arg(long, value_name = "SECS", requires = "passkey",
+    #[arg(long, value_name = "SECS", requires = "browser_login",
           value_parser = clap::value_parser!(u64).range(1..))]
     pub timeout: Option<u64>,
     /// Discard the saved session and clear FPL cookies in the profile first,
-    /// forcing a fresh passkey sign-in.
-    #[arg(long, requires = "passkey")]
+    /// forcing a fresh sign-in.
+    #[arg(long, requires = "browser_login")]
     pub reset_session: bool,
     /// Override the FPL login page URL (troubleshooting, if FPL moves it).
-    #[arg(long, value_name = "URL", requires = "passkey")]
+    #[arg(long, value_name = "URL", requires = "browser_login")]
     pub login_url: Option<String>,
 }
 
@@ -472,9 +485,47 @@ mod tests {
             &["fpl", "auth", "login", "--headless"],
             &["fpl", "auth", "login", "--reset-session"],
             &["fpl", "init", "--passkey"],
+            &["fpl", "init", "--mfa", "--headless"],
+            &["fpl", "auth", "login", "--passkey", "--mfa"],
+            &["fpl", "auth", "login", "--mfa", "--no-verify"],
+            &["fpl", "init", "--mfa", "--overwrite"],
         ] {
             assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} should fail");
         }
+    }
+
+    #[test]
+    fn mfa_login_options_parse() {
+        for flag in ["--mfa", "--MFA"] {
+            let cli = Cli::try_parse_from([
+                "fpl",
+                "init",
+                flag,
+                "--username",
+                "you@example.com",
+                "--password-stdin",
+            ])
+            .unwrap();
+            let Command::Init(args) = cli.command else {
+                panic!("expected init");
+            };
+            assert!(args.mfa && args.password_stdin);
+        }
+        let cli = Cli::try_parse_from([
+            "fpl",
+            "auth",
+            "login",
+            "--mfa",
+            "--timeout",
+            "60",
+            "--reset-session",
+        ])
+        .unwrap();
+        let Command::Auth(AuthCommand::Login(args)) = cli.command else {
+            panic!("expected auth login");
+        };
+        assert!(args.init.mfa && !args.passkey.passkey && args.passkey.reset_session);
+        assert_eq!(args.passkey.timeout, Some(60));
     }
 }
 

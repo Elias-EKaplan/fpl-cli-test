@@ -161,7 +161,7 @@ impl Fpl {
         if matches!(status.as_u16(), 401 | 403) {
             return Err(AppError::Auth(format!(
                 "FPL returned {} for {path} — session expired. Run `fpl init` again \
-                 (or `fpl auth login --passkey` for a passkey login).",
+                 (or `fpl auth login --passkey` / `fpl init --mfa` for a browser login).",
                 status.as_u16()
             )));
         }

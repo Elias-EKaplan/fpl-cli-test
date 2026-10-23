@@ -138,8 +138,9 @@ impl Ctx<'_> {
         };
         let secret = password.ok_or_else(|| {
             AppError::Auth(format!(
-                "no stored password or passkey session for {username:?} — run \
-                 `fpl auth login --passkey`, `fpl init`, or `fpl set-credential --stdin`"
+                "no stored password or browser session for {username:?} — run \
+                 `fpl auth login --passkey`, `fpl init --mfa`, `fpl init`, or \
+                 `fpl set-credential --stdin`"
             ))
         })?;
         self.debug(&format!("logging in to FPL as {username}"));
@@ -161,8 +162,8 @@ impl Ctx<'_> {
                 return Ok(None);
             }
             return Err(AppError::Auth(format!(
-                "the saved passkey session for {username:?} has expired — run \
-                 `fpl auth login --passkey`"
+                "the saved browser session for {username:?} has expired — run \
+                 `fpl auth login --passkey` or `fpl init --mfa` again"
             )));
         }
         let fpl = Fpl::from_session(saved)?;

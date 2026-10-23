@@ -31,7 +31,8 @@ pub struct Config {
     /// Chrome/Chromium/Edge executable for passkey login (default: auto-detect).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_path: Option<String>,
-    /// Seconds to wait for the passkey login to complete (default: 180).
+    /// Seconds to wait for a browser login to complete (default: 180 for
+    /// passkey, 300 for MFA).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_timeout: Option<u64>,
 }
